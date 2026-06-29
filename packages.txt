@@ -1,0 +1,6 @@
+tesseract-ocr
+tesseract-ocr-eng
+tesseract-ocr-kor
+libgl1
+libglib2.0-0
+poppler-utils

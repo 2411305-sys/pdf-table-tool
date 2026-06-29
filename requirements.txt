@@ -1,0 +1,4 @@
+streamlit
+img2table==2.0.0
+pandas
+openpyxl
