@@ -22,14 +22,78 @@ if TESSDATA_DIR.exists():
 
 st.set_page_config(page_title="PDF 표 추출기", layout="wide")
 
-st.title("PDF/이미지 표 추출기")
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1120px;
+        padding-top: 2.2rem;
+        padding-bottom: 3rem;
+    }
 
-uploaded_file = st.file_uploader(
-    "PDF 또는 이미지 파일을 업로드하세요",
-    type=["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+    h1 {
+        font-size: 2.4rem !important;
+        line-height: 1.15 !important;
+        margin-bottom: 0.35rem !important;
+    }
+
+    h2, h3 {
+        letter-spacing: 0 !important;
+    }
+
+    [data-testid="stFileUploader"] {
+        margin-top: 0.35rem;
+    }
+
+    [data-testid="stFileUploaderDropzone"] {
+        min-height: 116px;
+        border-radius: 8px;
+        border: 1px solid rgba(120, 130, 150, 0.42);
+    }
+
+    [data-testid="stFileUploaderDropzone"] button {
+        min-width: 98px;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button p {
+        display: none;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "파일 선택";
+        font-weight: 600;
+    }
+
+    div[data-testid="stDownloadButton"] button,
+    div[data-testid="stButton"] button {
+        border-radius: 8px;
+        min-height: 2.7rem;
+        font-weight: 650;
+    }
+
+    [data-testid="stDataFrame"] {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-left, middle, right = st.columns(3)
+st.title("PDF/이미지 표 추출기")
+st.caption("PDF나 스캔 이미지를 업로드하면 OCR 결과와 표 후보를 엑셀로 저장합니다.")
+
+st.divider()
+
+st.subheader("문서 업로드")
+uploaded_file = st.file_uploader(
+    "PDF 또는 이미지 파일",
+    type=["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+    label_visibility="collapsed",
+)
+
+st.subheader("추출 설정")
+left, middle, right = st.columns([1, 1, 1.15])
 
 with left:
     ocr_lang = st.selectbox("OCR 언어", ["kor+eng", "kor", "eng"], index=0)
@@ -117,9 +181,9 @@ def make_excel(text_df, table_df):
 
 
 if uploaded_file is not None:
-    st.write(f"업로드한 파일: `{uploaded_file.name}`")
+    st.success(f"업로드 완료: {uploaded_file.name}")
 
-    if st.button("표 추출하기", type="primary"):
+    if st.button("표 추출하기", type="primary", use_container_width=True):
         try:
             with st.spinner("OCR로 문서를 읽는 중입니다..."):
                 images = load_images(uploaded_file.name, uploaded_file.getvalue(), dpi)
@@ -136,22 +200,34 @@ if uploaded_file is not None:
 
             st.success("OCR 처리가 끝났습니다.")
 
-            st.subheader("표 후보")
-            if table_df.empty:
-                st.info("표처럼 나뉜 줄을 찾지 못했습니다. OCR_Text 시트를 확인해 주세요.")
-            else:
-                st.dataframe(table_df, hide_index=True, use_container_width=True)
+            result_left, result_right = st.columns([1.1, 1])
 
-            st.subheader("전체 OCR 텍스트")
-            st.dataframe(text_df, hide_index=True, use_container_width=True)
+            with result_left:
+                st.subheader("표 후보")
+                if table_df.empty:
+                    st.info("표처럼 나뉜 줄을 찾지 못했습니다. OCR_Text 시트를 확인해 주세요.")
+                else:
+                    st.dataframe(table_df, hide_index=True, use_container_width=True)
+
+            with result_right:
+                st.subheader("전체 OCR 텍스트")
+                st.dataframe(text_df, hide_index=True, use_container_width=True)
+
+            if table_df.empty:
+                file_name = "ocr_text.xlsx"
+            else:
+                file_name = "extracted_tables.xlsx"
 
             st.download_button(
                 "엑셀 다운로드",
                 data=excel_bytes,
-                file_name="extracted_tables.xlsx",
+                file_name=file_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
             )
 
         except Exception as error:
             st.error("처리 중 오류가 발생했습니다.")
             st.exception(error)
+else:
+    st.info("PDF, PNG, JPG, TIF, BMP 파일을 업로드할 수 있습니다.")
