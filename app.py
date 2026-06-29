@@ -1,202 +1,157 @@
-###############################################################################
-#
-# App - A class for writing the Excel XLSX App file.
-#
-# SPDX-License-Identifier: BSD-2-Clause
-#
-# Copyright (c) 2013-2025, John McNamara, jmcnamara@cpan.org
-#
+from io import BytesIO
+from pathlib import Path
+import os
+import re
 
-from typing import Dict, List, Tuple
-
-from . import xmlwriter
+import pandas as pd
+import pytesseract
+import streamlit as st
+from pdf2image import convert_from_bytes
+from PIL import Image
 
 
-class App(xmlwriter.XMLwriter):
-    """
-    A class for writing the Excel XLSX App file.
+TESSERACT_EXE = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+TESSDATA_DIR = Path(r"C:\Program Files\Tesseract-OCR\tessdata")
+
+if TESSERACT_EXE.exists():
+    pytesseract.pytesseract.tesseract_cmd = str(TESSERACT_EXE)
+
+if TESSDATA_DIR.exists():
+    os.environ["TESSDATA_PREFIX"] = str(TESSDATA_DIR)
 
 
-    """
+st.set_page_config(page_title="PDF 표 추출기", layout="wide")
 
-    ###########################################################################
-    #
-    # Public API.
-    #
-    ###########################################################################
+st.title("PDF/이미지 표 추출기")
 
-    def __init__(self) -> None:
-        """
-        Constructor.
+uploaded_file = st.file_uploader(
+    "PDF 또는 이미지 파일을 업로드하세요",
+    type=["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+)
 
-        """
+left, middle, right = st.columns(3)
 
-        super().__init__()
+with left:
+    ocr_lang = st.selectbox("OCR 언어", ["kor+eng", "kor", "eng"], index=0)
 
-        self.part_names = []
-        self.heading_pairs = []
-        self.properties = {}
-        self.doc_security = 0
+with middle:
+    dpi = st.selectbox("PDF 변환 품질", [150, 200, 250, 300], index=1)
 
-    def _add_part_name(self, part_name: str) -> None:
-        # Add the name of a workbook Part such as 'Sheet1' or 'Print_Titles'.
-        self.part_names.append(part_name)
+with right:
+    min_columns = st.slider("표로 볼 최소 열 수", 2, 8, 3)
 
-    def _add_heading_pair(self, heading_pair: Tuple[str, int]) -> None:
-        # Add the name of a workbook Heading Pair such as 'Worksheets',
-        # 'Charts' or 'Named Ranges'.
 
-        # Ignore empty pairs such as chartsheets.
-        if not heading_pair[1]:
-            return
+def load_images(file_name: str, file_bytes: bytes, pdf_dpi: int):
+    extension = file_name.lower().rsplit(".", 1)[-1]
 
-        self.heading_pairs.append(("lpstr", heading_pair[0]))
-        self.heading_pairs.append(("i4", heading_pair[1]))
+    if extension == "pdf":
+        return convert_from_bytes(file_bytes, dpi=pdf_dpi)
 
-    def _set_properties(self, properties: Dict[str, str]) -> None:
-        # Set the document properties.
-        self.properties = properties
+    image = Image.open(BytesIO(file_bytes))
+    return [image.convert("RGB")]
 
-    ###########################################################################
-    #
-    # Private API.
-    #
-    ###########################################################################
 
-    def _assemble_xml_file(self) -> None:
-        # Assemble and write the XML file.
+def ocr_image(image, lang: str):
+    config = "--psm 6 -c preserve_interword_spaces=1"
+    return pytesseract.image_to_string(image, lang=lang, config=config)
 
-        # Write the XML declaration.
-        self._xml_declaration()
 
-        self._write_properties()
-        self._write_application()
-        self._write_doc_security()
-        self._write_scale_crop()
-        self._write_heading_pairs()
-        self._write_titles_of_parts()
-        self._write_manager()
-        self._write_company()
-        self._write_links_up_to_date()
-        self._write_shared_doc()
-        self._write_hyperlink_base()
-        self._write_hyperlinks_changed()
-        self._write_app_version()
+def parse_table_rows(text: str, min_col_count: int):
+    rows = []
 
-        self._xml_end_tag("Properties")
+    for line in text.splitlines():
+        line = line.strip()
 
-        # Close the file.
-        self._xml_close()
+        if not line:
+            continue
 
-    ###########################################################################
-    #
-    # XML methods.
-    #
-    ###########################################################################
+        columns = [cell.strip() for cell in re.split(r"\s{2,}|\t+", line) if cell.strip()]
 
-    def _write_properties(self) -> None:
-        # Write the <Properties> element.
-        schema = "http://schemas.openxmlformats.org/officeDocument/2006/"
-        xmlns = schema + "extended-properties"
-        xmlns_vt = schema + "docPropsVTypes"
+        if len(columns) >= min_col_count:
+            rows.append(columns)
 
-        attributes = [
-            ("xmlns", xmlns),
-            ("xmlns:vt", xmlns_vt),
-        ]
+    if not rows:
+        return pd.DataFrame()
 
-        self._xml_start_tag("Properties", attributes)
+    max_columns = max(len(row) for row in rows)
+    padded_rows = [row + [""] * (max_columns - len(row)) for row in rows]
+    return pd.DataFrame(padded_rows)
 
-    def _write_application(self) -> None:
-        # Write the <Application> element.
-        self._xml_data_element("Application", "Microsoft Excel")
 
-    def _write_doc_security(self) -> None:
-        # Write the <DocSecurity> element.
-        self._xml_data_element("DocSecurity", self.doc_security)
+def make_text_dataframe(page_texts):
+    rows = []
 
-    def _write_scale_crop(self) -> None:
-        # Write the <ScaleCrop> element.
-        self._xml_data_element("ScaleCrop", "false")
+    for page_number, text in page_texts:
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            clean_line = line.strip()
 
-    def _write_heading_pairs(self) -> None:
-        # Write the <HeadingPairs> element.
-        self._xml_start_tag("HeadingPairs")
-        self._write_vt_vector("variant", self.heading_pairs)
-        self._xml_end_tag("HeadingPairs")
+            if clean_line:
+                rows.append(
+                    {
+                        "page": page_number,
+                        "line": line_number,
+                        "text": clean_line,
+                    }
+                )
 
-    def _write_titles_of_parts(self) -> None:
-        # Write the <TitlesOfParts> element.
-        parts_data = []
+    return pd.DataFrame(rows)
 
-        self._xml_start_tag("TitlesOfParts")
 
-        for part_name in self.part_names:
-            parts_data.append(("lpstr", part_name))
+def make_excel(text_df, table_df):
+    output = BytesIO()
 
-        self._write_vt_vector("lpstr", parts_data)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        text_df.to_excel(writer, sheet_name="OCR_Text", index=False)
 
-        self._xml_end_tag("TitlesOfParts")
+        if table_df.empty:
+            pd.DataFrame({"message": ["No table-like rows found"]}).to_excel(
+                writer,
+                sheet_name="Parsed_Table",
+                index=False,
+            )
+        else:
+            table_df.to_excel(writer, sheet_name="Parsed_Table", index=False, header=False)
 
-    def _write_vt_vector(
-        self, base_type: str, vector_data: List[Tuple[str, int]]
-    ) -> None:
-        # Write the <vt:vector> element.
-        attributes = [
-            ("size", len(vector_data)),
-            ("baseType", base_type),
-        ]
+    output.seek(0)
+    return output.getvalue()
 
-        self._xml_start_tag("vt:vector", attributes)
 
-        for vt_data in vector_data:
-            if base_type == "variant":
-                self._xml_start_tag("vt:variant")
+if uploaded_file is not None:
+    st.write(f"업로드한 파일: `{uploaded_file.name}`")
 
-            self._write_vt_data(vt_data)
+    if st.button("표 추출하기", type="primary"):
+        try:
+            with st.spinner("OCR로 문서를 읽는 중입니다..."):
+                images = load_images(uploaded_file.name, uploaded_file.getvalue(), dpi)
+                page_texts = []
 
-            if base_type == "variant":
-                self._xml_end_tag("vt:variant")
+                for page_number, image in enumerate(images, start=1):
+                    text = ocr_image(image, ocr_lang)
+                    page_texts.append((page_number, text))
 
-        self._xml_end_tag("vt:vector")
+                full_text = "\n".join(text for _, text in page_texts)
+                text_df = make_text_dataframe(page_texts)
+                table_df = parse_table_rows(full_text, min_columns)
+                excel_bytes = make_excel(text_df, table_df)
 
-    def _write_vt_data(self, vt_data: Tuple[str, int]) -> None:
-        # Write the <vt:*> elements such as <vt:lpstr> and <vt:if>.
-        self._xml_data_element(f"vt:{vt_data[0]}", vt_data[1])
+            st.success("OCR 처리가 끝났습니다.")
 
-    def _write_company(self) -> None:
-        company = self.properties.get("company", "")
+            st.subheader("표 후보")
+            if table_df.empty:
+                st.info("표처럼 나뉜 줄을 찾지 못했습니다. OCR_Text 시트를 확인해 주세요.")
+            else:
+                st.dataframe(table_df, hide_index=True, use_container_width=True)
 
-        self._xml_data_element("Company", company)
+            st.subheader("전체 OCR 텍스트")
+            st.dataframe(text_df, hide_index=True, use_container_width=True)
 
-    def _write_manager(self) -> None:
-        # Write the <Manager> element.
-        if "manager" not in self.properties:
-            return
+            st.download_button(
+                "엑셀 다운로드",
+                data=excel_bytes,
+                file_name="extracted_tables.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
-        self._xml_data_element("Manager", self.properties["manager"])
-
-    def _write_links_up_to_date(self) -> None:
-        # Write the <LinksUpToDate> element.
-        self._xml_data_element("LinksUpToDate", "false")
-
-    def _write_shared_doc(self) -> None:
-        # Write the <SharedDoc> element.
-        self._xml_data_element("SharedDoc", "false")
-
-    def _write_hyperlink_base(self) -> None:
-        # Write the <HyperlinkBase> element.
-        hyperlink_base = self.properties.get("hyperlink_base")
-
-        if hyperlink_base is None:
-            return
-
-        self._xml_data_element("HyperlinkBase", hyperlink_base)
-
-    def _write_hyperlinks_changed(self) -> None:
-        # Write the <HyperlinksChanged> element.
-        self._xml_data_element("HyperlinksChanged", "false")
-
-    def _write_app_version(self) -> None:
-        # Write the <AppVersion> element.
-        self._xml_data_element("AppVersion", "12.0000")
+        except Exception as error:
+            st.error("처리 중 오류가 발생했습니다.")
+            st.exception(error)

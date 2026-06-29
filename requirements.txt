@@ -1,4 +1,6 @@
 streamlit
-img2table==2.0.0
 pandas
 openpyxl
+pillow
+pytesseract
+pdf2image
