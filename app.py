@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import re
 
+import numpy as np
 import pandas as pd
 import pytesseract
 import streamlit as st
@@ -165,6 +166,122 @@ def ocr_image_data(image, lang: str):
     return clean_ocr_words(data)
 
 
+def group_indices(indices, max_gap=3, min_size=2):
+    if len(indices) == 0:
+        return []
+
+    groups = []
+    current = [int(indices[0])]
+
+    for index in indices[1:]:
+        index = int(index)
+
+        if index - current[-1] <= max_gap:
+            current.append(index)
+        else:
+            if len(current) >= min_size:
+                groups.append(current)
+            current = [index]
+
+    if len(current) >= min_size:
+        groups.append(current)
+
+    return [int(sum(group) / len(group)) for group in groups]
+
+
+def merge_close_positions(positions, min_gap=12):
+    merged = []
+
+    for position in positions:
+        if not merged or position - merged[-1] >= min_gap:
+            merged.append(position)
+        else:
+            merged[-1] = int((merged[-1] + position) / 2)
+
+    return merged
+
+
+def find_grid_lines(image):
+    gray = ImageOps.grayscale(image)
+    gray = ImageOps.autocontrast(gray)
+    array = np.array(gray)
+    dark_pixels = array < 120
+
+    row_density = dark_pixels.mean(axis=1)
+    column_density = dark_pixels.mean(axis=0)
+
+    row_threshold = max(0.20, float(row_density.mean() + row_density.std() * 3.0))
+    column_threshold = max(0.08, float(column_density.mean() + column_density.std() * 2.5))
+
+    row_indices = np.where(row_density > row_threshold)[0]
+    column_indices = np.where(column_density > column_threshold)[0]
+
+    rows = merge_close_positions(group_indices(row_indices), min_gap=10)
+    columns = merge_close_positions(group_indices(column_indices), min_gap=10)
+
+    return rows, columns
+
+
+def ocr_cell(cell_image, lang: str):
+    cell = ImageOps.grayscale(cell_image)
+    cell = ImageOps.autocontrast(cell)
+
+    if cell.width < 360:
+        ratio = 360 / cell.width
+        cell = cell.resize((360, int(cell.height * ratio)), Image.Resampling.LANCZOS)
+
+    cell = cell.filter(ImageFilter.SHARPEN)
+    text = pytesseract.image_to_string(cell, lang=lang, config="--psm 7")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" |")
+
+
+def extract_bordered_table(image, lang: str):
+    rows, columns = find_grid_lines(image)
+
+    if len(rows) < 2 or len(columns) < 2:
+        return pd.DataFrame()
+
+    table_rows = []
+
+    for row_index in range(len(rows) - 1):
+        top = rows[row_index]
+        bottom = rows[row_index + 1]
+
+        if bottom - top < 28:
+            continue
+
+        values = []
+
+        for column_index in range(len(columns) - 1):
+            left = columns[column_index]
+            right = columns[column_index + 1]
+
+            if right - left < 35:
+                continue
+
+            margin_x = max(6, int((right - left) * 0.04))
+            margin_y = max(6, int((bottom - top) * 0.10))
+            crop_box = (
+                left + margin_x,
+                top + margin_y,
+                right - margin_x,
+                bottom - margin_y,
+            )
+            cell = image.crop(crop_box)
+            values.append(ocr_cell(cell, lang))
+
+        if any(value.strip() for value in values):
+            table_rows.append(values)
+
+    if not table_rows:
+        return pd.DataFrame()
+
+    max_columns = max(len(row) for row in table_rows)
+    padded_rows = [row + [""] * (max_columns - len(row)) for row in table_rows]
+    return pd.DataFrame(padded_rows)
+
+
 def parse_table_rows_from_text(text: str, min_col_count: int):
     rows = []
 
@@ -263,6 +380,27 @@ def make_coordinate_table_dataframe(page_results, min_col_count: int):
     return pd.DataFrame(padded_rows)
 
 
+def combine_page_tables(page_tables):
+    if not page_tables:
+        return pd.DataFrame()
+
+    combined_rows = []
+
+    for page_number, dataframe in page_tables:
+        if dataframe.empty:
+            continue
+
+        for _, row in dataframe.iterrows():
+            combined_rows.append([f"p{page_number}"] + row.fillna("").astype(str).tolist())
+
+    if not combined_rows:
+        return pd.DataFrame()
+
+    max_columns = max(len(row) for row in combined_rows)
+    padded_rows = [row + [""] * (max_columns - len(row)) for row in combined_rows]
+    return pd.DataFrame(padded_rows)
+
+
 def make_excel(text_df, table_df):
     output = BytesIO()
 
@@ -290,6 +428,7 @@ if uploaded_file is not None:
             with st.spinner("OCR로 문서를 읽는 중입니다..."):
                 images = load_images(uploaded_file.name, uploaded_file.getvalue(), dpi)
                 page_results = []
+                page_tables = []
 
                 for page_number, image in enumerate(images, start=1):
                     prepared_image = prepare_image_for_ocr(image)
@@ -297,9 +436,16 @@ if uploaded_file is not None:
                     words = ocr_image_data(prepared_image, ocr_lang)
                     page_results.append((page_number, text, words))
 
+                    bordered_table = extract_bordered_table(prepared_image, ocr_lang)
+                    if not bordered_table.empty:
+                        page_tables.append((page_number, bordered_table))
+
                 full_text = "\n".join(text for _, text, _ in page_results)
                 text_df = make_text_dataframe(page_results)
-                table_df = make_coordinate_table_dataframe(page_results, min_columns)
+                table_df = combine_page_tables(page_tables)
+
+                if table_df.empty:
+                    table_df = make_coordinate_table_dataframe(page_results, min_columns)
 
                 if table_df.empty:
                     table_df = parse_table_rows_from_text(full_text, min_columns)
