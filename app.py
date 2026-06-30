@@ -52,8 +52,27 @@ st.markdown(
         border: 1px solid rgba(120, 130, 150, 0.42);
     }
 
-    [data-testid="stFileUploaderDropzone"] button {
+    [data-testid="stFileUploaderDropzone"] > button {
         min-width: 98px;
+        font-size: 0 !important;
+        color: transparent !important;
+        position: relative;
+    }
+
+    [data-testid="stFileUploaderDropzone"] > button * {
+        font-size: 0 !important;
+        color: transparent !important;
+        visibility: hidden !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] > button::after {
+        content: "파일 선택";
+        color: #ffffff;
+        display: inline-block;
+        font-size: 0.95rem;
+        font-weight: 650;
+        line-height: 1.2;
+        visibility: visible !important;
     }
 
     div[data-testid="stDownloadButton"] button,
