@@ -201,20 +201,40 @@ def merge_close_positions(positions, min_gap=12):
     return merged
 
 
+def max_true_run_per_row(mask):
+    runs = []
+
+    for row in mask:
+        max_run = 0
+        current_run = 0
+
+        for value in row:
+            if value:
+                current_run += 1
+                max_run = max(max_run, current_run)
+            else:
+                current_run = 0
+
+        runs.append(max_run)
+
+    return np.array(runs)
+
+
+def max_true_run_per_column(mask):
+    return max_true_run_per_row(mask.T)
+
+
 def find_grid_lines(image):
     gray = ImageOps.grayscale(image)
     gray = ImageOps.autocontrast(gray)
     array = np.array(gray)
     dark_pixels = array < 120
 
-    row_density = dark_pixels.mean(axis=1)
-    column_density = dark_pixels.mean(axis=0)
+    row_runs = max_true_run_per_row(dark_pixels)
+    column_runs = max_true_run_per_column(dark_pixels)
 
-    row_threshold = max(0.20, float(row_density.mean() + row_density.std() * 3.0))
-    column_threshold = max(0.08, float(column_density.mean() + column_density.std() * 2.5))
-
-    row_indices = np.where(row_density > row_threshold)[0]
-    column_indices = np.where(column_density > column_threshold)[0]
+    row_indices = np.where(row_runs > image.width * 0.45)[0]
+    column_indices = np.where(column_runs > image.height * 0.08)[0]
 
     rows = merge_close_positions(group_indices(row_indices), min_gap=10)
     columns = merge_close_positions(group_indices(column_indices), min_gap=10)
@@ -226,14 +246,45 @@ def ocr_cell(cell_image, lang: str):
     cell = ImageOps.grayscale(cell_image)
     cell = ImageOps.autocontrast(cell)
 
-    if cell.width < 360:
-        ratio = 360 / cell.width
-        cell = cell.resize((360, int(cell.height * ratio)), Image.Resampling.LANCZOS)
+    if cell.width < 520:
+        ratio = 520 / cell.width
+        cell = cell.resize((520, int(cell.height * ratio)), Image.Resampling.LANCZOS)
 
     cell = cell.filter(ImageFilter.SHARPEN)
-    text = pytesseract.image_to_string(cell, lang=lang, config="--psm 7")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip(" |")
+
+    candidates = []
+    language_candidates = [lang]
+
+    if "kor" in lang and "kor" not in language_candidates:
+        language_candidates.append("kor")
+
+    if "eng" in lang and "eng" not in language_candidates:
+        language_candidates.append("eng")
+
+    for ocr_lang in language_candidates:
+        for config in ("--psm 7", "--psm 6", "--psm 13"):
+            text = pytesseract.image_to_string(cell, lang=ocr_lang, config=config)
+            text = re.sub(r"\s+", " ", text).strip(" |")
+
+            if text:
+                korean_count = len(re.findall(r"[가-힣]", text))
+                digit_count = len(re.findall(r"\d", text))
+                alpha_count = len(re.findall(r"[A-Za-z]", text))
+                punctuation_count = len(re.findall(r"[,.-]", text))
+                noise_count = len(re.findall(r"[^0-9A-Za-z가-힣,.\-\s]", text))
+                score = (
+                    korean_count * 2.5
+                    + digit_count * 1.2
+                    + alpha_count * 0.7
+                    + punctuation_count * 0.2
+                    - noise_count * 1.5
+                )
+                candidates.append((score, text))
+
+    if not candidates:
+        return ""
+
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def extract_bordered_table(image, lang: str):
@@ -391,7 +442,7 @@ def combine_page_tables(page_tables):
             continue
 
         for _, row in dataframe.iterrows():
-            combined_rows.append([f"p{page_number}"] + row.fillna("").astype(str).tolist())
+            combined_rows.append(row.fillna("").astype(str).tolist())
 
     if not combined_rows:
         return pd.DataFrame()
@@ -399,6 +450,64 @@ def combine_page_tables(page_tables):
     max_columns = max(len(row) for row in combined_rows)
     padded_rows = [row + [""] * (max_columns - len(row)) for row in combined_rows]
     return pd.DataFrame(padded_rows)
+
+
+def normalize_header_name(value, index):
+    text = str(value).strip()
+    compact = re.sub(r"\s+", "", text)
+
+    if not compact:
+        return f"열 {index + 1}"
+
+    if "품" in compact:
+        return "품목"
+
+    if "수" in compact or "량" in compact:
+        return "수량"
+
+    if "단" in compact or "가" == compact:
+        return "단가"
+
+    if "공급" in compact or "금액" in compact:
+        return "공급가액"
+
+    if "비고" in compact:
+        return "비고"
+
+    return compact
+
+
+def polish_table_dataframe(dataframe):
+    if dataframe.empty:
+        return dataframe
+
+    table = dataframe.copy()
+    table = table.fillna("").astype(str)
+    table = table.loc[:, table.apply(lambda column: column.str.strip().ne("").any())]
+
+    if table.empty:
+        return table
+
+    first_column = table.iloc[:, 0].str.strip()
+
+    if first_column.str.fullmatch(r"p\d+").all():
+        table = table.iloc[:, 1:]
+
+    if table.empty:
+        return table
+
+    first_row = table.iloc[0].astype(str).str.strip().tolist()
+    header_keywords = ("품", "수", "량", "단", "공급", "금액", "비고")
+    has_header = any(any(keyword in cell for keyword in header_keywords) for cell in first_row)
+
+    if has_header and len(table) > 1:
+        headers = [normalize_header_name(value, index) for index, value in enumerate(first_row)]
+        table = table.iloc[1:].reset_index(drop=True)
+        table.columns = headers
+    else:
+        table.columns = [f"열 {index + 1}" for index in range(table.shape[1])]
+
+    return table
 
 
 def make_excel(text_df, table_df):
@@ -450,6 +559,7 @@ if uploaded_file is not None:
                 if table_df.empty:
                     table_df = parse_table_rows_from_text(full_text, min_columns)
 
+                table_df = polish_table_dataframe(table_df)
                 excel_bytes = make_excel(text_df, table_df)
 
             st.success("OCR 처리가 끝났습니다.")
