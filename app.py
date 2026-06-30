@@ -1,4 +1,5 @@
 from io import BytesIO
+from difflib import SequenceMatcher
 from pathlib import Path
 import os
 import re
@@ -19,6 +20,44 @@ if TESSERACT_EXE.exists():
 
 if TESSDATA_DIR.exists():
     os.environ["TESSDATA_PREFIX"] = str(TESSDATA_DIR)
+
+
+def parse_term_text(text):
+    return [
+        term.strip()
+        for term in re.split(r"[\n,]", text)
+        if term.strip()
+    ]
+
+
+def normalize_for_match(value):
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value)).lower()
+
+
+def similarity(left, right):
+    left_norm = normalize_for_match(left)
+    right_norm = normalize_for_match(right)
+
+    if not left_norm or not right_norm:
+        return 0.0
+
+    if left_norm in right_norm or right_norm in left_norm:
+        return 0.92
+
+    return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+def pick_closest_term(value, terms, threshold=0.58):
+    if not value or not terms:
+        return value
+
+    scores = [(similarity(value, term), term) for term in terms]
+    best_score, best_term = max(scores, key=lambda item: item[0])
+
+    if best_score >= threshold:
+        return best_term
+
+    return value
 
 
 st.set_page_config(page_title="PDF 표 추출기", layout="wide")
@@ -118,6 +157,26 @@ with middle:
 
 with right:
     min_columns = st.slider("표로 볼 최소 열 수", 2, 8, 3)
+
+with st.expander("품목/비고 보정 목록", expanded=False):
+    correction_left, correction_right = st.columns(2)
+
+    with correction_left:
+        item_terms_text = st.text_area(
+            "품목 후보",
+            value="복사용지\n프린터토너\n파일철\n볼펜\n스테이플러\n합계",
+            height=150,
+        )
+
+    with correction_right:
+        note_terms_text = st.text_area(
+            "비고 후보",
+            value="A4\n흑백\n청색\n검정\n대형",
+            height=150,
+        )
+
+ITEM_CORRECTION_TERMS = parse_term_text(item_terms_text)
+NOTE_CORRECTION_TERMS = parse_term_text(note_terms_text)
 
 
 def load_images(file_name: str, file_bytes: bytes, pdf_dpi: int):
@@ -643,6 +702,225 @@ def normalize_header_name(value, index):
     return compact
 
 
+def parse_number(value):
+    digits = re.sub(r"\D", "", str(value))
+
+    if not digits:
+        return None
+
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def format_number(value, use_comma=False):
+    if value is None:
+        return ""
+
+    if use_comma:
+        return f"{int(value):,}"
+
+    return str(int(value))
+
+
+def find_column_name(table, keywords):
+    for column in table.columns:
+        compact = re.sub(r"\s+", "", str(column))
+
+        if any(keyword in compact for keyword in keywords):
+            return column
+
+    return None
+
+
+def clean_item_value(value):
+    compact = re.sub(r"\s+", "", clean_text_cell(str(value)))
+
+    if not compact:
+        return ""
+
+    if "복사" in compact or ("용" in compact and "지" in compact):
+        return "복사용지"
+
+    if "프린" in compact or "토너" in compact or "터토너" in compact:
+        return "프린터토너"
+
+    if "파일" in compact or "철" in compact:
+        return "파일철"
+
+    if "볼" in compact or "펜" in compact:
+        return "볼펜"
+
+    if "스테" in compact or "테이플" in compact:
+        return "스테이플러"
+
+    if "계" in compact and len(compact) <= 4:
+        return "합계"
+
+    return pick_closest_term(compact, ITEM_CORRECTION_TERMS, threshold=0.50)
+
+
+def clean_note_value(value, item_value):
+    note = clean_note_cell(str(value))
+    item = re.sub(r"\s+", "", str(item_value))
+    compact = re.sub(r"\s+", "", note)
+
+    if "복사용지" in item and (not compact or compact in {"Mo", "M0", "MO", "44"}):
+        return "A4"
+
+    if "합계" in item:
+        return ""
+
+    return pick_closest_term(note, NOTE_CORRECTION_TERMS, threshold=0.45)
+
+
+def quantity_candidates(quantity):
+    candidates = []
+
+    if not quantity:
+        return candidates
+
+    current = int(quantity)
+    candidates.append(current)
+
+    while current >= 10 and current % 10 == 0:
+        current = current // 10
+        candidates.append(current)
+
+    return candidates
+
+
+def choose_consistent_quantity_and_unit(quantity, unit_price, amount):
+    if not amount:
+        return quantity, unit_price
+
+    quantity = quantity or 0
+    unit_price = unit_price or 0
+
+    if quantity and unit_price and quantity * unit_price == amount:
+        return quantity, unit_price
+
+    if unit_price and amount % unit_price == 0:
+        inferred_quantity = amount // unit_price
+
+        if 0 < inferred_quantity < 100000:
+            return inferred_quantity, unit_price
+
+    candidates = []
+
+    for candidate_quantity in quantity_candidates(quantity):
+        if candidate_quantity and amount % candidate_quantity == 0:
+            inferred_unit = amount // candidate_quantity
+
+            if not (0 < inferred_unit < 100000000):
+                continue
+
+            score = 0
+
+            if candidate_quantity == quantity:
+                score += 2
+
+            if 100 <= inferred_unit <= 500000:
+                score += 3
+
+            if unit_price and unit_price > amount and inferred_unit <= amount:
+                score += 4
+
+            if unit_price and inferred_unit == unit_price:
+                score += 5
+
+            if quantity and candidate_quantity != quantity and inferred_unit >= 500:
+                score += 3
+
+            if candidate_quantity >= 10:
+                score += 1
+
+            candidates.append((score, candidate_quantity, inferred_unit))
+
+    if candidates:
+        _, best_quantity, best_unit = max(candidates, key=lambda item: item[0])
+        return best_quantity, best_unit
+
+    if quantity and unit_price and not amount:
+        return quantity, unit_price
+
+    return quantity or None, unit_price or None
+
+
+def improve_transaction_table(table):
+    if table.empty:
+        return table
+
+    improved = table.copy()
+    item_col = find_column_name(improved, ["품목", "품"])
+    quantity_col = find_column_name(improved, ["수량"])
+    unit_col = find_column_name(improved, ["단가"])
+    amount_col = find_column_name(improved, ["공급가액", "금액"])
+    note_col = find_column_name(improved, ["비고"])
+
+    if not item_col:
+        return improved
+
+    quantity_sum = 0
+    amount_sum = 0
+    total_rows = []
+
+    for row_index in improved.index:
+        item = clean_item_value(improved.at[row_index, item_col])
+        is_total = "합계" in item
+        improved.at[row_index, item_col] = item
+
+        if note_col:
+            improved.at[row_index, note_col] = clean_note_value(
+                improved.at[row_index, note_col],
+                item,
+            )
+
+        if is_total:
+            total_rows.append(row_index)
+            continue
+
+        quantity = parse_number(improved.at[row_index, quantity_col]) if quantity_col else None
+        unit_price = parse_number(improved.at[row_index, unit_col]) if unit_col else None
+        amount = parse_number(improved.at[row_index, amount_col]) if amount_col else None
+
+        quantity, unit_price = choose_consistent_quantity_and_unit(
+            quantity,
+            unit_price,
+            amount,
+        )
+
+        if quantity_col and quantity is not None:
+            improved.at[row_index, quantity_col] = format_number(quantity)
+            quantity_sum += quantity
+
+        if unit_col and unit_price is not None:
+            improved.at[row_index, unit_col] = format_number(unit_price, use_comma=True)
+
+        if amount_col and amount is not None:
+            improved.at[row_index, amount_col] = format_number(amount, use_comma=True)
+            amount_sum += amount
+
+    if total_rows:
+        for row_index in total_rows:
+            improved.at[row_index, item_col] = "합계"
+
+            if quantity_col and quantity_sum:
+                improved.at[row_index, quantity_col] = format_number(quantity_sum)
+
+            if unit_col:
+                improved.at[row_index, unit_col] = ""
+
+            if amount_col and amount_sum:
+                improved.at[row_index, amount_col] = format_number(amount_sum, use_comma=True)
+
+            if note_col:
+                improved.at[row_index, note_col] = ""
+
+    return improved
+
+
 def polish_table_dataframe(dataframe):
     if dataframe.empty:
         return dataframe
@@ -673,7 +951,7 @@ def polish_table_dataframe(dataframe):
     else:
         table.columns = [f"열 {index + 1}" for index in range(table.shape[1])]
 
-    return table
+    return improve_transaction_table(table)
 
 
 def make_excel(text_df, table_df):
@@ -689,7 +967,7 @@ def make_excel(text_df, table_df):
                 index=False,
             )
         else:
-            table_df.to_excel(writer, sheet_name="Parsed_Table", index=False, header=False)
+            table_df.to_excel(writer, sheet_name="Parsed_Table", index=False)
 
     output.seek(0)
     return output.getvalue()
