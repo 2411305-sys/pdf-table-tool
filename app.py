@@ -249,7 +249,58 @@ def find_grid_lines(image):
     return rows, columns
 
 
-def ocr_cell(cell_image, lang: str):
+def clean_numeric_text(text, allow_comma=True):
+    replacements = {
+        "O": "0",
+        "o": "0",
+        "I": "1",
+        "l": "1",
+        "|": "1",
+        "S": "5",
+        "s": "5",
+        "B": "8",
+    }
+
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+
+    allowed = r"[^0-9,.\-]" if allow_comma else r"[^0-9\-]"
+    text = re.sub(allowed, "", text)
+    text = text.strip(".,-")
+
+    if not text:
+        return ""
+
+    if allow_comma:
+        digits = re.sub(r"\D", "", text)
+
+        if digits and len(digits) > 3 and "," not in text:
+            return f"{int(digits):,}"
+
+    return text
+
+
+def score_text_candidate(text, mode):
+    if mode in ("integer", "money"):
+        cleaned = clean_numeric_text(text, allow_comma=mode == "money")
+        return len(cleaned), cleaned
+
+    korean_count = len(re.findall(r"[가-힣]", text))
+    digit_count = len(re.findall(r"\d", text))
+    alpha_count = len(re.findall(r"[A-Za-z]", text))
+    punctuation_count = len(re.findall(r"[,.-]", text))
+    noise_count = len(re.findall(r"[^0-9A-Za-z가-힣,.\-\s]", text))
+    score = (
+        korean_count * 2.5
+        + digit_count * 1.2
+        + alpha_count * 0.7
+        + punctuation_count * 0.2
+        - noise_count * 1.5
+    )
+    return score, text
+
+
+def ocr_cell(cell_image, lang: str, mode="text"):
     cell = ImageOps.grayscale(cell_image)
     cell = ImageOps.autocontrast(cell)
 
@@ -261,37 +312,57 @@ def ocr_cell(cell_image, lang: str):
 
     candidates = []
     language_candidates = [lang]
+    configs = ["--psm 7", "--psm 6", "--psm 13"]
 
-    if "kor" in lang and "kor" not in language_candidates:
-        language_candidates.append("kor")
+    if mode == "integer":
+        language_candidates = ["eng"]
+        configs = [
+            "--psm 7 -c tessedit_char_whitelist=0123456789",
+            "--psm 6 -c tessedit_char_whitelist=0123456789",
+            "--psm 13 -c tessedit_char_whitelist=0123456789",
+        ]
+    elif mode == "money":
+        language_candidates = ["eng"]
+        configs = [
+            "--psm 7 -c tessedit_char_whitelist=0123456789,.",
+            "--psm 6 -c tessedit_char_whitelist=0123456789,.",
+            "--psm 13 -c tessedit_char_whitelist=0123456789,.",
+        ]
 
-    if "eng" in lang and "eng" not in language_candidates:
-        language_candidates.append("eng")
+    if mode == "text":
+        if "kor" in lang and "kor" not in language_candidates:
+            language_candidates.append("kor")
+
+        if "eng" in lang and "eng" not in language_candidates:
+            language_candidates.append("eng")
 
     for ocr_lang in language_candidates:
-        for config in ("--psm 7", "--psm 6", "--psm 13"):
+        for config in configs:
             text = pytesseract.image_to_string(cell, lang=ocr_lang, config=config)
             text = re.sub(r"\s+", " ", text).strip(" |")
 
             if text:
-                korean_count = len(re.findall(r"[가-힣]", text))
-                digit_count = len(re.findall(r"\d", text))
-                alpha_count = len(re.findall(r"[A-Za-z]", text))
-                punctuation_count = len(re.findall(r"[,.-]", text))
-                noise_count = len(re.findall(r"[^0-9A-Za-z가-힣,.\-\s]", text))
-                score = (
-                    korean_count * 2.5
-                    + digit_count * 1.2
-                    + alpha_count * 0.7
-                    + punctuation_count * 0.2
-                    - noise_count * 1.5
-                )
-                candidates.append((score, text))
+                score, cleaned_text = score_text_candidate(text, mode)
+
+                if cleaned_text:
+                    candidates.append((score, cleaned_text))
 
     if not candidates:
         return ""
 
     return max(candidates, key=lambda item: item[0])[1]
+
+
+def classify_column_mode(header_text):
+    header = re.sub(r"\s+", "", str(header_text))
+
+    if "수" in header or "량" in header:
+        return "integer"
+
+    if "단" in header or "공급" in header or "금액" in header:
+        return "money"
+
+    return "text"
 
 
 def extract_bordered_table(image, lang: str):
@@ -300,7 +371,7 @@ def extract_bordered_table(image, lang: str):
     if len(rows) < 2 or len(columns) < 2:
         return pd.DataFrame()
 
-    table_rows = []
+    cell_grid = []
 
     for row_index in range(len(rows) - 1):
         top = rows[row_index]
@@ -309,7 +380,7 @@ def extract_bordered_table(image, lang: str):
         if bottom - top < 28:
             continue
 
-        values = []
+        cell_images = []
 
         for column_index in range(len(columns) - 1):
             left = columns[column_index]
@@ -327,7 +398,24 @@ def extract_bordered_table(image, lang: str):
                 bottom - margin_y,
             )
             cell = image.crop(crop_box)
-            values.append(ocr_cell(cell, lang))
+            cell_images.append(cell)
+
+        if cell_images:
+            cell_grid.append(cell_images)
+
+    if not cell_grid:
+        return pd.DataFrame()
+
+    header_values = [ocr_cell(cell, lang, "text") for cell in cell_grid[0]]
+    column_modes = [classify_column_mode(header) for header in header_values]
+    table_rows = [header_values]
+
+    for row_cells in cell_grid[1:]:
+        values = []
+
+        for column_index, cell in enumerate(row_cells):
+            mode = column_modes[column_index] if column_index < len(column_modes) else "text"
+            values.append(ocr_cell(cell, lang, mode))
 
         if any(value.strip() for value in values):
             table_rows.append(values)
