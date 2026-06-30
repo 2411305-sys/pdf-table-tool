@@ -52,27 +52,31 @@ st.markdown(
         border: 1px solid rgba(120, 130, 150, 0.42);
     }
 
-    [data-testid="stFileUploaderDropzone"] > button {
-        min-width: 98px;
-        font-size: 0 !important;
-        color: transparent !important;
-        position: relative;
-    }
-
-    [data-testid="stFileUploaderDropzone"] > button * {
-        font-size: 0 !important;
-        color: transparent !important;
-        visibility: hidden !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] > button::after {
-        content: "파일 선택";
-        color: #ffffff;
-        display: inline-block;
-        font-size: 0.95rem;
+    [data-testid="stFileUploaderDropzone"]::before {
+        content: "파일을 이 영역에 끌어놓거나 버튼 위치를 클릭하세요";
+        display: block;
+        margin-bottom: 0.65rem;
+        color: rgba(250, 250, 250, 0.82);
         font-weight: 650;
-        line-height: 1.2;
-        visibility: visible !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button {
+        width: 46px !important;
+        min-width: 46px !important;
+        height: 38px !important;
+        padding: 0 !important;
+        font-size: 0 !important;
+        color: transparent !important;
+        overflow: hidden !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button p,
+    [data-testid="stFileUploaderDropzone"] button span,
+    [data-testid="stFileUploaderDropzone"] button [data-testid="stMarkdownContainer"] {
+        font-size: 0 !important;
+        color: transparent !important;
+        width: 0 !important;
+        overflow: hidden !important;
     }
 
     div[data-testid="stDownloadButton"] button,
