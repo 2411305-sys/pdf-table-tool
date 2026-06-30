@@ -7,7 +7,7 @@ import pandas as pd
 import pytesseract
 import streamlit as st
 from pdf2image import convert_from_bytes
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
 
 
 TESSERACT_EXE = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
@@ -106,7 +106,7 @@ with left:
     ocr_lang = st.selectbox("OCR 언어", ["kor+eng", "kor", "eng"], index=0)
 
 with middle:
-    dpi = st.selectbox("PDF 변환 품질", [150, 200, 250, 300], index=1)
+    dpi = st.selectbox("PDF 변환 품질", [150, 200, 250, 300], index=2)
 
 with right:
     min_columns = st.slider("표로 볼 최소 열 수", 2, 8, 3)
@@ -122,12 +122,50 @@ def load_images(file_name: str, file_bytes: bytes, pdf_dpi: int):
     return [image.convert("RGB")]
 
 
+def prepare_image_for_ocr(image):
+    prepared = ImageOps.grayscale(image)
+    prepared = ImageOps.autocontrast(prepared)
+
+    if prepared.width < 1800:
+        ratio = 1800 / prepared.width
+        prepared = prepared.resize(
+            (1800, int(prepared.height * ratio)),
+            Image.Resampling.LANCZOS,
+        )
+
+    prepared = prepared.filter(ImageFilter.SHARPEN)
+    return prepared
+
+
+def clean_ocr_words(dataframe):
+    if dataframe.empty or "text" not in dataframe.columns:
+        return pd.DataFrame()
+
+    words = dataframe.copy()
+    words["text"] = words["text"].fillna("").astype(str).str.strip()
+    words["conf"] = pd.to_numeric(words["conf"], errors="coerce").fillna(-1)
+    words = words[(words["text"] != "") & (words["text"].str.lower() != "nan")]
+    words = words[words["conf"] >= 0]
+    return words
+
+
 def ocr_image(image, lang: str):
     config = "--psm 6 -c preserve_interword_spaces=1"
     return pytesseract.image_to_string(image, lang=lang, config=config)
 
 
-def parse_table_rows(text: str, min_col_count: int):
+def ocr_image_data(image, lang: str):
+    config = "--psm 6 -c preserve_interword_spaces=1"
+    data = pytesseract.image_to_data(
+        image,
+        lang=lang,
+        config=config,
+        output_type=pytesseract.Output.DATAFRAME,
+    )
+    return clean_ocr_words(data)
+
+
+def parse_table_rows_from_text(text: str, min_col_count: int):
     rows = []
 
     for line in text.splitlines():
@@ -136,7 +174,7 @@ def parse_table_rows(text: str, min_col_count: int):
         if not line:
             continue
 
-        columns = [cell.strip() for cell in re.split(r"\s{2,}|\t+", line) if cell.strip()]
+        columns = [cell.strip() for cell in re.split(r"\s+|\t+", line) if cell.strip()]
 
         if len(columns) >= min_col_count:
             rows.append(columns)
@@ -149,10 +187,44 @@ def parse_table_rows(text: str, min_col_count: int):
     return pd.DataFrame(padded_rows)
 
 
-def make_text_dataframe(page_texts):
+def split_line_words_into_cells(line_words):
+    line_words = line_words.sort_values("left")
+
+    if len(line_words) <= 1:
+        return line_words["text"].tolist()
+
+    widths = line_words["width"].clip(lower=1)
+    median_width = float(widths.median()) if not widths.empty else 20.0
+    gap_threshold = max(22.0, median_width * 0.9)
+
+    cells = []
+    current_cell = []
+    previous_right = None
+
+    for _, word in line_words.iterrows():
+        left = float(word["left"])
+        right = left + float(word["width"])
+        text = str(word["text"]).strip()
+
+        if previous_right is not None and left - previous_right > gap_threshold:
+            if current_cell:
+                cells.append(" ".join(current_cell))
+            current_cell = [text]
+        else:
+            current_cell.append(text)
+
+        previous_right = right
+
+    if current_cell:
+        cells.append(" ".join(current_cell))
+
+    return cells
+
+
+def make_text_dataframe(page_results):
     rows = []
 
-    for page_number, text in page_texts:
+    for page_number, text, _ in page_results:
         for line_number, line in enumerate(text.splitlines(), start=1):
             clean_line = line.strip()
 
@@ -166,6 +238,29 @@ def make_text_dataframe(page_texts):
                 )
 
     return pd.DataFrame(rows)
+
+
+def make_coordinate_table_dataframe(page_results, min_col_count: int):
+    rows = []
+
+    for page_number, _, words in page_results:
+        if words.empty:
+            continue
+
+        grouped = words.groupby(["block_num", "par_num", "line_num"], sort=True)
+
+        for _, line_words in grouped:
+            cells = split_line_words_into_cells(line_words)
+
+            if len(cells) >= min_col_count:
+                rows.append([f"p{page_number}"] + cells)
+
+    if not rows:
+        return pd.DataFrame()
+
+    max_columns = max(len(row) for row in rows)
+    padded_rows = [row + [""] * (max_columns - len(row)) for row in rows]
+    return pd.DataFrame(padded_rows)
 
 
 def make_excel(text_df, table_df):
@@ -194,15 +289,21 @@ if uploaded_file is not None:
         try:
             with st.spinner("OCR로 문서를 읽는 중입니다..."):
                 images = load_images(uploaded_file.name, uploaded_file.getvalue(), dpi)
-                page_texts = []
+                page_results = []
 
                 for page_number, image in enumerate(images, start=1):
-                    text = ocr_image(image, ocr_lang)
-                    page_texts.append((page_number, text))
+                    prepared_image = prepare_image_for_ocr(image)
+                    text = ocr_image(prepared_image, ocr_lang)
+                    words = ocr_image_data(prepared_image, ocr_lang)
+                    page_results.append((page_number, text, words))
 
-                full_text = "\n".join(text for _, text in page_texts)
-                text_df = make_text_dataframe(page_texts)
-                table_df = parse_table_rows(full_text, min_columns)
+                full_text = "\n".join(text for _, text, _ in page_results)
+                text_df = make_text_dataframe(page_results)
+                table_df = make_coordinate_table_dataframe(page_results, min_columns)
+
+                if table_df.empty:
+                    table_df = parse_table_rows_from_text(full_text, min_columns)
+
                 excel_bytes = make_excel(text_df, table_df)
 
             st.success("OCR 처리가 끝났습니다.")
