@@ -280,21 +280,81 @@ def clean_numeric_text(text, allow_comma=True):
     return text
 
 
+def clean_text_cell(text):
+    text = re.sub(r"\s+", " ", text).strip(" |")
+    text = re.sub(r"\b0{3,}\b", "", text)
+    text = re.sub(r"(?<=[가-힣])\s*[0O]{3,}$", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def clean_note_cell(text):
+    text = clean_text_cell(text)
+    compact = re.sub(r"\s+", "", text)
+
+    if not compact:
+        return ""
+
+    if re.fullmatch(r"(?i)a?4|44|aA|Aa", compact):
+        return "A4"
+
+    compact = re.sub(r"(?<=[가-힣])[A-Za-z0-9]{1,3}$", "", compact)
+
+    if ("흑" in compact or "혹" in compact or "호" in compact) and (
+        "백" in compact or "배" in compact
+    ):
+        return "흑백"
+
+    if "청" in compact and ("색" in compact or "책" in compact):
+        return "청색"
+
+    if "검" in compact or "겸" in compact:
+        return "검정"
+
+    if "대" in compact and ("형" in compact or "항" in compact):
+        return "대형"
+
+    if re.search(r"[가-힣]", compact):
+        compact = re.sub(r"[^가-힣A-Za-z0-9,.\-]", "", compact)
+        return compact
+
+    return re.sub(r"[^A-Za-z0-9,.\-]", "", compact)
+
+
 def score_text_candidate(text, mode):
     if mode in ("integer", "money"):
         cleaned = clean_numeric_text(text, allow_comma=mode == "money")
         return len(cleaned), cleaned
 
+    if mode == "note":
+        text = clean_note_cell(text)
+    else:
+        text = clean_text_cell(text)
+
     korean_count = len(re.findall(r"[가-힣]", text))
     digit_count = len(re.findall(r"\d", text))
     alpha_count = len(re.findall(r"[A-Za-z]", text))
     punctuation_count = len(re.findall(r"[,.-]", text))
+    repeated_zero_noise = len(re.findall(r"\b0{3,}\b", text))
     noise_count = len(re.findall(r"[^0-9A-Za-z가-힣,.\-\s]", text))
+
+    if mode == "note":
+        score = (
+            korean_count * 3.0
+            + alpha_count * 1.4
+            + digit_count * 0.9
+            + punctuation_count * 0.2
+            - repeated_zero_noise * 5.0
+            - noise_count * 2.0
+        )
+        return score, text
+
     score = (
         korean_count * 2.5
-        + digit_count * 1.2
+        + digit_count * 0.35
         + alpha_count * 0.7
         + punctuation_count * 0.2
+        - repeated_zero_noise * 5.0
         - noise_count * 1.5
     )
     return score, text
@@ -328,6 +388,14 @@ def ocr_cell(cell_image, lang: str, mode="text"):
             "--psm 6 -c tessedit_char_whitelist=0123456789,.",
             "--psm 13 -c tessedit_char_whitelist=0123456789,.",
         ]
+    elif mode == "note":
+        language_candidates = []
+
+        for candidate_lang in (lang, "kor+eng", "kor", "eng"):
+            if candidate_lang not in language_candidates:
+                language_candidates.append(candidate_lang)
+
+        configs = ["--psm 7", "--psm 8", "--psm 6", "--psm 13"]
 
     if mode == "text":
         if "kor" in lang and "kor" not in language_candidates:
@@ -355,6 +423,9 @@ def ocr_cell(cell_image, lang: str, mode="text"):
 
 def classify_column_mode(header_text):
     header = re.sub(r"\s+", "", str(header_text))
+
+    if "비" in header or "고" in header:
+        return "note"
 
     if "수" in header or "량" in header:
         return "integer"
