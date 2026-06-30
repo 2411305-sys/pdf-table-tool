@@ -54,22 +54,6 @@ st.markdown(
 
     [data-testid="stFileUploaderDropzone"] button {
         min-width: 98px;
-        font-size: 0 !important;
-        color: transparent !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] button * {
-        font-size: 0 !important;
-        color: transparent !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] button::after {
-        content: "파일 선택";
-        color: #ffffff;
-        display: inline-block;
-        font-size: 0.95rem;
-        font-weight: 600;
-        line-height: 1.2;
     }
 
     div[data-testid="stDownloadButton"] button,
