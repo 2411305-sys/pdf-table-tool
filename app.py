@@ -163,7 +163,7 @@ mode_left, mode_right = st.columns([1, 1])
 with mode_left:
     document_mode = st.selectbox(
         "문서 유형",
-        ["일반 표", "거래/구매내역서"],
+        ["일반 표", "거래/구매내역서", "학교 명단/출석부"],
         index=0,
     )
 
@@ -171,6 +171,7 @@ with mode_right:
     use_first_row_header = st.checkbox("첫 행을 열 이름으로 사용", value=True)
 
 apply_transaction_correction = document_mode == "거래/구매내역서"
+apply_school_correction = document_mode == "학교 명단/출석부"
 
 if apply_transaction_correction:
     with st.expander("품목/비고 보정 목록", expanded=False):
@@ -195,6 +196,18 @@ if apply_transaction_correction:
 else:
     ITEM_CORRECTION_TERMS = []
     NOTE_CORRECTION_TERMS = []
+
+if apply_school_correction:
+    with st.expander("학생 이름 보정 목록", expanded=False):
+        student_names_text = st.text_area(
+            "학생 이름 후보",
+            value="김민준\n이서연\n박지호\n최지우\n정하준\n강서아\n조도윤\n윤하은",
+            height=150,
+        )
+
+    STUDENT_NAME_TERMS = parse_term_text(student_names_text)
+else:
+    STUDENT_NAME_TERMS = []
 
 
 
@@ -940,7 +953,77 @@ def improve_transaction_table(table):
     return improved
 
 
-def polish_table_dataframe(dataframe, use_header=True, apply_transaction=False):
+def clean_school_name(value):
+    compact = re.sub(r"[^가-힣A-Za-z]", "", clean_text_cell(str(value)))
+
+    if not compact:
+        return ""
+
+    return pick_closest_term(compact, STUDENT_NAME_TERMS, threshold=0.45)
+
+
+def clean_school_number(value, max_value=None):
+    number = parse_number(value)
+
+    if number is None:
+        return ""
+
+    while max_value and number > max_value and number >= 10 and number % 10 == 0:
+        number = number // 10
+
+    if max_value and number > max_value:
+        digits = re.sub(r"\D", "", str(value))
+
+        for size in range(1, min(3, len(digits)) + 1):
+            candidate = int(digits[:size])
+
+            if 1 <= candidate <= max_value:
+                return str(candidate)
+
+    return str(number)
+
+
+def improve_school_table(table):
+    if table.empty:
+        return table
+
+    improved = table.copy()
+    name_col = find_column_name(improved, ["이름", "성명", "학생명"])
+    class_col = find_column_name(improved, ["반", "학급"])
+    number_col = find_column_name(improved, ["번호", "번"])
+    grade_col = find_column_name(improved, ["학년"])
+
+    for row_index in improved.index:
+        if name_col:
+            improved.at[row_index, name_col] = clean_school_name(improved.at[row_index, name_col])
+
+        if class_col:
+            improved.at[row_index, class_col] = clean_school_number(
+                improved.at[row_index, class_col],
+                max_value=20,
+            )
+
+        if number_col:
+            improved.at[row_index, number_col] = clean_school_number(
+                improved.at[row_index, number_col],
+                max_value=60,
+            )
+
+        if grade_col:
+            improved.at[row_index, grade_col] = clean_school_number(
+                improved.at[row_index, grade_col],
+                max_value=6,
+            )
+
+    return improved
+
+
+def polish_table_dataframe(
+    dataframe,
+    use_header=True,
+    apply_transaction=False,
+    apply_school=False,
+):
     if dataframe.empty:
         return dataframe
 
@@ -979,6 +1062,9 @@ def polish_table_dataframe(dataframe, use_header=True, apply_transaction=False):
 
     if apply_transaction:
         return improve_transaction_table(table)
+
+    if apply_school:
+        return improve_school_table(table)
 
     return table
 
@@ -1036,6 +1122,7 @@ if uploaded_file is not None:
                     table_df,
                     use_header=use_first_row_header,
                     apply_transaction=apply_transaction_correction,
+                    apply_school=apply_school_correction,
                 )
                 excel_bytes = make_excel(text_df, table_df)
 
