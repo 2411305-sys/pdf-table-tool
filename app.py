@@ -158,25 +158,44 @@ with middle:
 with right:
     min_columns = st.slider("표로 볼 최소 열 수", 2, 8, 3)
 
-with st.expander("품목/비고 보정 목록", expanded=False):
-    correction_left, correction_right = st.columns(2)
+mode_left, mode_right = st.columns([1, 1])
 
-    with correction_left:
-        item_terms_text = st.text_area(
-            "품목 후보",
-            value="복사용지\n프린터토너\n파일철\n볼펜\n스테이플러\n합계",
-            height=150,
-        )
+with mode_left:
+    document_mode = st.selectbox(
+        "문서 유형",
+        ["일반 표", "거래/구매내역서"],
+        index=0,
+    )
 
-    with correction_right:
-        note_terms_text = st.text_area(
-            "비고 후보",
-            value="A4\n흑백\n청색\n검정\n대형",
-            height=150,
-        )
+with mode_right:
+    use_first_row_header = st.checkbox("첫 행을 열 이름으로 사용", value=True)
 
-ITEM_CORRECTION_TERMS = parse_term_text(item_terms_text)
-NOTE_CORRECTION_TERMS = parse_term_text(note_terms_text)
+apply_transaction_correction = document_mode == "거래/구매내역서"
+
+if apply_transaction_correction:
+    with st.expander("품목/비고 보정 목록", expanded=False):
+        correction_left, correction_right = st.columns(2)
+
+        with correction_left:
+            item_terms_text = st.text_area(
+                "품목 후보",
+                value="복사용지\n프린터토너\n파일철\n볼펜\n스테이플러\n합계",
+                height=150,
+            )
+
+        with correction_right:
+            note_terms_text = st.text_area(
+                "비고 후보",
+                value="A4\n흑백\n청색\n검정\n대형",
+                height=150,
+            )
+
+    ITEM_CORRECTION_TERMS = parse_term_text(item_terms_text)
+    NOTE_CORRECTION_TERMS = parse_term_text(note_terms_text)
+else:
+    ITEM_CORRECTION_TERMS = []
+    NOTE_CORRECTION_TERMS = []
+
 
 
 def load_images(file_name: str, file_bytes: bytes, pdf_dpi: int):
@@ -921,7 +940,7 @@ def improve_transaction_table(table):
     return improved
 
 
-def polish_table_dataframe(dataframe):
+def polish_table_dataframe(dataframe, use_header=True, apply_transaction=False):
     if dataframe.empty:
         return dataframe
 
@@ -944,14 +963,24 @@ def polish_table_dataframe(dataframe):
     header_keywords = ("품", "수", "량", "단", "공급", "금액", "비고")
     has_header = any(any(keyword in cell for keyword in header_keywords) for cell in first_row)
 
-    if has_header and len(table) > 1:
-        headers = [normalize_header_name(value, index) for index, value in enumerate(first_row)]
+    if use_header and len(table) > 1:
+        if apply_transaction and has_header:
+            headers = [normalize_header_name(value, index) for index, value in enumerate(first_row)]
+        else:
+            headers = [
+                str(value).strip() or f"열 {index + 1}"
+                for index, value in enumerate(first_row)
+            ]
+
         table = table.iloc[1:].reset_index(drop=True)
         table.columns = headers
     else:
         table.columns = [f"열 {index + 1}" for index in range(table.shape[1])]
 
-    return improve_transaction_table(table)
+    if apply_transaction:
+        return improve_transaction_table(table)
+
+    return table
 
 
 def make_excel(text_df, table_df):
@@ -1003,7 +1032,11 @@ if uploaded_file is not None:
                 if table_df.empty:
                     table_df = parse_table_rows_from_text(full_text, min_columns)
 
-                table_df = polish_table_dataframe(table_df)
+                table_df = polish_table_dataframe(
+                    table_df,
+                    use_header=use_first_row_header,
+                    apply_transaction=apply_transaction_correction,
+                )
                 excel_bytes = make_excel(text_df, table_df)
 
             st.success("OCR 처리가 끝났습니다.")
